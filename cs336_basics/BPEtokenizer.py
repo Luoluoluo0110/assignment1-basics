@@ -1,5 +1,5 @@
 import regex as re
-
+from collections import Counter
 
 
 def train_bpe(input_path, vocab_size, special_tokens):
@@ -15,7 +15,7 @@ def train_bpe(input_path, vocab_size, special_tokens):
 
 
     # 这里面放着所有的token的张量
-    all_tokens = []
+    word_counts = Counter()
 
     # encode 原始的词表
     # 遍历每一段话（根据"<|endoftext|>"分割开）
@@ -27,8 +27,12 @@ def train_bpe(input_path, vocab_size, special_tokens):
             # 将每一个token转换成byte
             # 将这个token的每一个byte存在一个数组中
             # 比如"hello" → [104, 101, 108, 108, 111]
-            token_list = list(match.group().encode('utf-8'))
-            all_tokens.append(token_list)
+            word_counts[match.group()] += 1
+    all_tokens = []
+    for word, count in word_counts.items():
+        token_list = list(word.encode('utf-8'))
+        all_tokens.append([token_list, count])
+            
 
     # 建立词汇表和建立词汇表大小
     vocab = {i: bytes([i]) for i in range(256)}
@@ -40,12 +44,12 @@ def train_bpe(input_path, vocab_size, special_tokens):
         pair_counts = {}
         # 单独处理每一个token
 
-        for token_list in all_tokens:
+        for token_list, count in all_tokens:
             for i in range(len(token_list) - 1):
                 first_byte = token_list[i]
                 second_byte = token_list[i+1]
                 cur_pair = (first_byte, second_byte)
-                pair_counts[cur_pair] = pair_counts.get(cur_pair, 0) + 1
+                pair_counts[cur_pair] = pair_counts.get(cur_pair, 0) + count
         
         # 所有的token统计完了之后寻找一个出现次数最多的
         best_pair = max(pair_counts.items(), key=lambda x: (x[1], vocab[x[0][0]], vocab[x[0][1]]))[0]
@@ -54,7 +58,7 @@ def train_bpe(input_path, vocab_size, special_tokens):
 
         # 用这个新的替换旧的
         for i in range(len(all_tokens)):
-            old_list = all_tokens[i]
+            old_list, count = all_tokens[i]
             # new_list is a new list to replece the old_list
             new_list = []
             j = 0
@@ -65,7 +69,7 @@ def train_bpe(input_path, vocab_size, special_tokens):
                 else:
                     new_list.append(old_list[j])
                     j += 1
-            all_tokens[i] = new_list
+            all_tokens[i] = [new_list, count]
         vocab[new_idx] = vocab[best_pair[0]] + vocab[best_pair[1]]
     return vocab, merges
     
