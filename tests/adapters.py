@@ -16,10 +16,15 @@ from cs336_basics.linear import Linear
 from cs336_basics.embedding import Embedding
 from cs336_basics.RMSNorm import RMSNorm
 from cs336_basics.swiglu import SiLU, SwiGLU
-from cs336_basics.softmax import softmax, scaled_dot_product_attention, multihead_self_attention, multihead_self_attention_with_rope, cross_entropy
+from cs336_basics.utils import lr_cosine_schedule, softmax, scaled_dot_product_attention, cross_entropy, gradient_clipping
 from cs336_basics.rotaryPositionalEmbedding import RotaryPositionalEmbedding
 from cs336_basics.Adamw import Adamw
-
+from cs336_basics.multihead_self_attention import MultiheadSelfAttention
+from cs336_basics.multihead_self_attention_with_rope import MultiheadSelfAttentionWithRoPE
+from cs336_basics.TransformerBlock import TransformerBlock
+from cs336_basics.TransformerLM import TransformerLM
+from cs336_basics.data import get_batch
+from cs336_basics.serialization import save_checkpoint, load_checkpoint
 # Complete
 def run_linear(
     d_in: int,
@@ -154,7 +159,13 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    return multihead_self_attention(d_model, num_heads, q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight, in_features)
+    attn = MultiheadSelfAttention(d_model, num_heads)
+    attn.q_proj.weight.data = q_proj_weight
+    attn.k_proj.weight.data = k_proj_weight
+    attn.v_proj.weight.data = v_proj_weight
+    attn.o_proj.weight.data = o_proj_weight
+    
+    return attn(in_features)
 
 
 
@@ -195,7 +206,14 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    return multihead_self_attention_with_rope(d_model, num_heads, max_seq_len, theta, q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight, in_features, token_positions)
+    attn = MultiheadSelfAttentionWithRoPE(d_model, num_heads, max_seq_len, theta)
+    attn.eval ()
+    attn.q_proj.weight.data = q_proj_weight
+    attn.k_proj.weight.data = k_proj_weight
+    attn.v_proj.weight.data = v_proj_weight
+    attn.o_proj.weight.data = o_proj_weight
+
+    return attn(in_features, token_positions)
 
 # complete
 def run_rope(
@@ -293,57 +311,19 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    
-    eps = 1e-5
-    q_proj_weight = weights["attn.q_proj.weight"]
-    k_proj_weight = weights["attn.k_proj.weight"]
-    v_proj_weight = weights["attn.v_proj.weight"]
-    o_proj_weight = weights["attn.output_proj.weight"]
-    
-    ln1_weight = weights["ln1.weight"]
-    ln2_weight = weights["ln2.weight"]
-
-    ffn_w1 = weights["ffn.w1.weight"]
-    ffn_w2 = weights["ffn.w2.weight"]
-    ffn_w3 = weights["ffn.w3.weight"]
-    
-    x = in_features
-    B, S, _ = x.shape
-
-    token_positions = torch.arange(S, device=x.device).unsqueeze(0).repeat(B, 1)
-     
-    # 1. RNS + 多头注意力机制
-
-    x = in_features
-    attn_norm = run_rmsnorm(d_model, eps, ln1_weight, x)
-    attn_out = run_multihead_self_attention_with_rope(
+    block = TransformerBlock(
         d_model=d_model,
         num_heads=num_heads,
-        max_seq_len=max_seq_len,
-        theta=theta,
-        q_proj_weight=q_proj_weight,
-        k_proj_weight=k_proj_weight,
-        v_proj_weight=v_proj_weight,
-        o_proj_weight=o_proj_weight,
-        in_features=attn_norm,
-        token_positions=token_positions       
-    )
-    # 残差连接
-    x = x + attn_out
-    
-    # 2. Pre-Norm + FFN + 残差
-    ffn_in = run_rmsnorm(d_model, eps, ln2_weight, x)
-    ffn_out = run_swiglu(
-        d_model=d_model,
         d_ff=d_ff,
-        w1_weight=ffn_w1,
-        w2_weight=ffn_w2,
-        w3_weight=ffn_w3,
-        in_features=ffn_in
-    )     
-    x = x + ffn_out
-    
-    return x
+        max_seq_len=max_seq_len,
+        theta=theta
+    )
+
+    block.load_state_dict(weights)
+    block.eval()
+    with torch.no_grad():
+        out = block(in_features)
+    return out
 
 
 def run_transformer_lm(
@@ -425,36 +405,26 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    eps = 1e-5
-    token_embeddings = weights["token_embeddings.weight"]
-    ln_final_weight = weights["ln_final.weight"]
-    lm_head_weight = weights["lm_head.weight"]
-    
-    # 词嵌入去除相应序号token的向量
-    x = token_embeddings[in_indices]
-    for layer_index in range(num_layers):
+    model = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        d_model=d_model,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=rope_theta
+    )
 
-        # 这个取出的字符串处理很关键, 标识的改动必须去掉前面的layer, 使后面的看的懂
-        layer_weight = {
-            k.replace(f"layers.{layer_index}.", ""): v
-            for k, v in weights.items()
-            if k.startswith(f"layers.{layer_index}.")
-        }
-        
-        # 调用block
-        x = run_transformer_block(
-            d_model=d_model,
-            num_heads=num_heads,
-            d_ff=d_ff,
-            max_seq_len=context_length,
-            theta=rope_theta,
-            weights=layer_weight,
-            in_features=x
-        )
-     # 3.最后一层的RMSNorm
-    x = run_rmsnorm(d_model, eps, ln_final_weight, x)
-    logits = x @ lm_head_weight.T
-    
+    # 2. 加载权重
+    model.load_state_dict(weights)
+
+    # 3. 推理模式
+    model.eval()
+
+    # 4. 前向传播
+    with torch.no_grad():
+        logits = model(in_indices)
+
     return logits
 
 # Complete
@@ -519,20 +489,7 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    N = len(dataset)
-    max_start = N - context_length - 1
-    starts = np.random.randint(0, max_start+1, batch_size)
-    
-    inputs_list = []
-    targets_list = []
-    for i in starts:
-        inputs_segment = dataset[i: i+context_length]
-        targets_segment = dataset[i+1: i+1+context_length]
-        inputs_list.append(inputs_segment)
-        targets_list.append(targets_segment)
-    inputs = torch.tensor(np.array(inputs_list), dtype=torch.long).to(device)
-    targets = torch.tensor(np.array(targets_list), dtype=torch.long).to(device)    
-    return inputs, targets
+    return get_batch(dataset, batch_size, context_length, device)
 
 # Complete
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -577,26 +534,7 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    # 算所有梯度拼起来的总 L2 范数
-    # 如果范数太大，算一个缩放系数
-    # 把所有梯度同比例缩小（原地修改）
-    eps = 1e-6
-    total_norm = 0.0 # 累加所有梯度的平方
-    
-    for p in parameters:
-        if p.grad is None:
-            continue
-        grad_norm = p.grad.norm(2) # 计算梯度的L2范数
-        total_norm += grad_norm ** 2
-    total_norm = torch.sqrt(torch.tensor(total_norm))
-    
-    clip_coef = max_l2_norm / (total_norm + eps)
-    with torch.no_grad():
-        if clip_coef < 1:
-            for p in parameters:
-                if p.grad is None:
-                    continue
-                p.grad.mul_(clip_coef)
+    return gradient_clipping(parameters, max_l2_norm)
 
 
 
@@ -633,18 +571,7 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    if it < warmup_iters:
-        return (it / warmup_iters) * max_learning_rate
-    elif it < cosine_cycle_iters:
-        # progress = (it - Tw) / (Tc - Tw)
-        # cosine = cos(π * progress)
-        # lr = min_lr + 0.5*(max-min) * (1 + cosine)
-        progress = (it - warmup_iters) / (cosine_cycle_iters - warmup_iters)
-        cosine = math.cos(math.pi * progress)
-        lr = min_learning_rate + 0.5*(max_learning_rate-min_learning_rate) * (1 + cosine)
-        return lr
-    
-    return min_learning_rate
+    return lr_cosine_schedule(it: int, max_learning_rate: float, min_learning_rate: float, warmup_iters: int, cosine_cycle_iters: int)
 
 
 
@@ -664,12 +591,7 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    checkpoint = {
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "iteration": iteration
-    }
-    torch.save(checkpoint, out)
+    return save_checkpoint(model, optimizer, iteration, out)
 
 
 def run_load_checkpoint(
@@ -690,11 +612,7 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    checkpoint = torch.load(src)
-    model.load_state_dict(checkpoint["model"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
-
-    return checkpoint["iteration"]
+    return load_checkpoint(src, model, optimizer)
 
 # Complete
 def get_tokenizer(

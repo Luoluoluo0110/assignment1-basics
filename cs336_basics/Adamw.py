@@ -50,18 +50,20 @@ class Adamw(torch.optim.Optimizer):
                 t = state["t"]
                 
                 # t + 1
+                t = state["t"]
                 t += 1
+                state["t"] = t
                 # 更新 m
                 # mₜ = β₁ × mₜ₋₁ + (1 − β₁) × gₜ
-                m = m.mul_(beta1).add_(grad, alpha=1-beta1)              
+                m.mul_(beta1).add_(grad, alpha=1-beta1)              
                 # 更新 v
                 # v = β₂ * v + (1 − β₂) * (梯度)²
-                v = v.mul_(beta2).add_(grad.pow(2), alpha=1-beta2)
+                v.mul_(beta2).add_(grad.pow(2), alpha=1-beta2)
                 # 计算偏差修正 m_hat, v_hat
                 m_hat = m / (1 - beta1 ** t) 
                 v_hat = v / (1 - beta2 ** t)
                 # 计算 update, 平均抖动除以抖动大小（衡量方向的参数）
-                update = m_hat / (math.sqrt(v_hat) + eps)
+                update = m_hat / (torch.sqrt(v_hat) + eps)
 
                 # ====================
                 # AdamW 关键：
