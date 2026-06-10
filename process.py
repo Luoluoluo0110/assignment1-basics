@@ -41,7 +41,7 @@ def main():
         merges=merges,
         special_tokens=["<|endoftext|>"]
     )
-    process_file("data/TinyStoriesV2-GPT4-train.txt",   "data/val.bin",   tokenizer)
+    process_file("data/TinyStoriesV2-GPT4-train.txt", "data/train.bin", tokenizer)
 
 if __name__ == "__main__":
     main()

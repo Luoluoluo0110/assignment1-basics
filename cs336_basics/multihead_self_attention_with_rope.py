@@ -37,6 +37,7 @@ class MultiheadSelfAttentionWithRoPE(nn.Module):
 
         # RoPE
         rope = rotaryPositionalEmbedding.RotaryPositionalEmbedding(self.theta, self.d_k, self.max_seq_len, device=Q.device)
+        token_positions = token_positions.unsqueeze(1)
         Q = rope(Q, token_positions)
         K = rope(K, token_positions)
 
