@@ -110,7 +110,7 @@ def generate(
         # ----------------------
         if use_greedy:
             # 贪心解码：取概率最大的id
-            next_token = next_logits.argmax(dim=-1)
+            next_token = next_logits.argmax(dim=-1, keepdim=True)
         else:
             # 1. 温度缩放
             next_logits = next_logits / temperature
@@ -135,7 +135,6 @@ def generate(
         # ----------------------
         # 【填空9】将新token拼接到原序列末尾
         # ----------------------
-        next_token = next_token.unsqueeze(0)
         input_ids = torch.cat([input_ids, next_token], dim=-1)
 
         # 遇到结束符，提前终止生成
@@ -177,12 +176,12 @@ if __name__ == "__main__":
         max_new_tokens=150,
         temperature=0.7,
         top_p=0.9,
-        use_greedy=True  # 先开贪心，跑通后再关闭
+        use_greedy=False  # 先开贪心，跑通后再关闭
     )
 
     # ----------------------
     # 【填空12】id列表解码为文本并打印
     # ----------------------
     output_text = tokenizer.decode(generated_ids)
-    print("\n=== 生成结果 ===")
+    print("\n=== result ===")
     print(output_text)
